@@ -1,0 +1,6 @@
+spring:
+  application:
+    name: dv01-loan-api
+
+loan-data:
+    path: data/LoanStats.csv
