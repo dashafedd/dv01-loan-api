@@ -4,7 +4,7 @@ import java.math.BigDecimal
 import java.time.YearMonth
 
 class Loan(
-    val id: Long?,
+    val id: String?,
     val issueMonth: YearMonth?,
     val state: String,
     val grade: Char?,
