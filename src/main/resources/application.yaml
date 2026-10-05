@@ -3,4 +3,4 @@ spring:
     name: dv01-loan-api
 
 loan-data:
-    path: data/LoanStats.csv
+    path: data/LoanStats_securev1_2017Q4.csv

@@ -1,5 +1,6 @@
 package dv01.loan.api.service
 
+import dv01.loan.api.model.FicoBand
 import dv01.loan.api.model.loan.GroupStats
 import dv01.loan.api.model.loan.LoanFilter
 import dv01.loan.api.model.loan.LoanStats
@@ -13,6 +14,15 @@ data class SummaryResponse(
     val filters: Map<String, Any>,
     val totals: LoanStats,
     val groups: List<GroupStats>,
+)
+
+data class LoanFilterOptions(
+    val recordCount: Int,
+    val issueMonths: List<String>,
+    val grades: List<String>,
+    val states: List<String>,
+    val purposes: List<String>,
+    val ficoBands: List<String>,
 )
 
 @Service
@@ -36,6 +46,18 @@ class LoanQueryService(private val repository: LoanRepository) {
             groups = groupedLoansStats.entries
                 .sortedBy { it.key }
                 .map { (key, accumulator) -> accumulator.getGroupStats(key, loansStats.totalAmount) },
+        )
+    }
+
+    val options: LoanFilterOptions by lazy {
+        val loans = repository.loans
+        LoanFilterOptions(
+            recordCount = loans.size,
+            issueMonths = loans.map { it.issueMonth.toString() }.distinct().sorted(),
+            grades = loans.map { it.grade.toString() }.distinct().sorted(),
+            states = loans.map { it.state }.distinct().sorted(),
+            purposes = loans.map { it.purpose }.distinct().sorted(),
+            ficoBands = loans.map { FicoBand.labelFor(it.ficoMidpoint) }.distinct().sorted(),
         )
     }
 

@@ -17,4 +17,11 @@ enum class GroupBy(val parameterValue: String) {
         FICO_BAND -> FicoBand.labelFor(loan.ficoMidpoint)
         PURPOSE -> loan.purpose
     }
+
+    companion object {
+        fun parse(value: String): GroupBy? =
+            GroupBy.entries.firstOrNull { it.parameterValue.equals(value, ignoreCase = true) }
+
+        fun allowedValues(): String = GroupBy.entries.joinToString(", ") { it.parameterValue }
+    }
 }
