@@ -15,14 +15,22 @@ import java.time.format.ResolverStyle
 import java.util.EnumMap
 import java.util.Locale
 
+/** What a load produces: the accepted loans and a report of what was accepted and rejected. */
 data class LoadResult(val loans: List<Loan>, val report: LoadingReport)
 
+/**
+ * Reads the loan CSV file and converts each row into a Loan.
+ * Rows with missing or invalid values are rejected and counted by reason, not loaded.
+ * Only the columns listed below are read, the rest of the file is ignored.
+ */
 @Component
 class CsvLoanLoader {
 
     private companion object {
         val log = LoggerFactory.getLogger(CsvLoanLoader::class.java)
+        val FICO_RANGE = 300..850
 
+        // default format handles quoted values that contain commas or line breaks
         val CSV_FORMAT: CSVFormat = CSVFormat.DEFAULT.builder()
             .setIgnoreEmptyLines(true)
             .build()
@@ -33,6 +41,7 @@ class CsvLoanLoader {
             .toFormatter(Locale.ENGLISH)
             .withResolverStyle(ResolverStyle.STRICT)
 
+        // column names as they appear in the file header
         const val ID_COLUMN = "id"
         const val LOAN_AMOUNT_COLUMN = "loan_amnt"
         const val FUNDED_AMOUNT_COLUMN = "funded_amnt"
@@ -46,18 +55,23 @@ class CsvLoanLoader {
         const val STATUS_COLUMN = "loan_status"
     }
 
+    /**
+     * Loads all loans from the file in a single pass.
+     * Fails if the file can't be read or has no header row.
+     */
     fun load(path: Path): LoadResult {
         require(Files.isReadable(path)) {
             "Loan data file is not found or not readable: ${path.toAbsolutePath()}."
         }
+
         log.info("Loading loans from {}", path.toAbsolutePath())
 
         val loans = ArrayList<Loan>()
-        //map column name to position in the record
-        var columnsMap: Map<String, Int>? = null
-        var rejectedFunded = BigDecimal.ZERO
         var acceptedFunded = BigDecimal.ZERO
+        var rejectedFunded = BigDecimal.ZERO
+        var columnsMap: Map<String, Int>? = null //map column name to position in the record
         val rejectedByReason = EnumMap<RejectReason, Int>(RejectReason::class.java)
+        var footerTotal: BigDecimal? = null
         val startedAt = System.nanoTime()
 
         Files.newBufferedReader(path).use { reader ->
@@ -66,22 +80,26 @@ class CsvLoanLoader {
                     if (record.size() == 0) continue
 
                     val firstCell = record[0].trim()
+                    // the file starts with a notes line, so skip everything until the header row
                     if (columnsMap == null) {
                         if (firstCell == ID_COLUMN) columnsMap = indexColumns(record)
                         continue
                     }
 
-                    //to check
+                    // the file ends with total lines, they are not loans
                     if (firstCell.startsWith("Total amount funded")) {
+                        footerTotal = parseFooterTotal(firstCell) ?: footerTotal
                         continue
                     }
 
+                    // a row with a different number of values than the header can't be read reliably
                     if (record.size() != columnsMap.size) {
                         rejectedByReason.merge(RejectReason.MALFORMED_ROW, 1, Int::plus)
                         continue
                     }
 
-                    val funded = columnsMap["funded_amnt"]
+                    // read the funded amount separately, so rejected rows still count in the footer check
+                    val funded = columnsMap[FUNDED_AMOUNT_COLUMN]
                         ?.let { record[it].trim().toBigDecimalOrNull() }
                         ?: BigDecimal.ZERO
 
@@ -110,17 +128,23 @@ class CsvLoanLoader {
             rejectedByReason = rejectedByReason.toMap(),
             loadMillis = (System.nanoTime() - startedAt) / 1_000_000,
             acceptedFundedAmount = acceptedFunded,
-            rejectedFundedAmount = rejectedFunded
+            rejectedFundedAmount = rejectedFunded,
+            footerFundedAmount = footerTotal,
         )
 
         return LoadResult(loans, report)
     }
 
+    /**
+     * Converts one row into a Loan.
+     * Stops at the first invalid value and returns it as the reject reason.
+     */
     private fun parseLoan(record: CSVRecord, columns: Map<String, Int>): ParseOutcome {
+        // value of the given column in this row, trimmed
         fun column(name: String): String = columns[name]?.let { record[it].trim() } ?: ""
 
         val id = column(ID_COLUMN).takeIf { it.isNotEmpty() }
-            ?: return ParseOutcome.Rejected(RejectReason.BAD_ID) // to check
+            ?: return ParseOutcome.Rejected(RejectReason.BAD_ID)
         val loanAmount = column(LOAN_AMOUNT_COLUMN).toBigDecimalOrNull()?.takeIf { it > BigDecimal.ZERO }
             ?: return ParseOutcome.Rejected(RejectReason.BAD_AMOUNT)
         val fundedAmount = column(FUNDED_AMOUNT_COLUMN).toBigDecimalOrNull()?.takeIf { it >= BigDecimal.ZERO }
@@ -137,13 +161,20 @@ class CsvLoanLoader {
             ?: return ParseOutcome.Rejected(RejectReason.BAD_ISSUE_DATE)
 
         val state = column(ADDRESS_STATE_COLUMN).uppercase(Locale.ROOT)
+            .takeIf { it.length == 2 && it.all(Char::isLetter) }
+            ?: return ParseOutcome.Rejected(RejectReason.BAD_STATE)
 
         val ficoLow = column(FICO_LOW_COLUMN).toIntOrNull()
             ?: return ParseOutcome.Rejected(RejectReason.BAD_FICO)
         val ficoHigh = column(FICO_HIGH_COLUMN).toIntOrNull()
             ?: return ParseOutcome.Rejected(RejectReason.BAD_FICO)
+        if (ficoLow !in FICO_RANGE || ficoHigh !in FICO_RANGE || ficoHigh < ficoLow) {
+            return ParseOutcome.Rejected(RejectReason.BAD_FICO)
+        }
         val grade = column(GRADE_COLUMN).firstOrNull()?.uppercaseChar()
             ?: return ParseOutcome.Rejected(RejectReason.BAD_GRADE)
+        val purpose = column(PURPOSE_COLUMN).lowercase(Locale.ROOT).takeIf { it.isNotEmpty() }
+            ?: return ParseOutcome.Rejected(RejectReason.BAD_PURPOSE)
 
         return ParseOutcome.Accepted(
             Loan(
@@ -156,18 +187,30 @@ class CsvLoanLoader {
                 loanAmount = loanAmount,
                 fundedAmount = fundedAmount,
                 interestRate = rate,
-                purpose = column(PURPOSE_COLUMN),
+                purpose = purpose,
                 status = column(STATUS_COLUMN),
             )
         )
     }
 
+    /** Maps each column name in the header to its position, so values can be read by name. */
     private fun indexColumns(header: CSVRecord): Map<String, Int> =
         header.toList().withIndex().associate { (index, name) -> name.trim() to index }
 
+    /** Result of parsing one row: either a loan or the reason it was rejected. */
     private sealed interface ParseOutcome {
         data class Accepted(val loan: Loan) : ParseOutcome
         data class Rejected(val reason: RejectReason) : ParseOutcome
     }
+
+    /**
+     * Reads the total from the line
+     * Only policy code 1 is used, the policy code 2 total is ignored.
+     */
+    private fun parseFooterTotal(cell: String): BigDecimal? =
+        cell.takeIf { it.startsWith("Total amount funded in policy code 1") }
+            ?.substringAfter(':')
+            ?.trim()
+            ?.toBigDecimalOrNull()
 
 }

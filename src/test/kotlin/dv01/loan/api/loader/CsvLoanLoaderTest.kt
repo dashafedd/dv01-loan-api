@@ -160,6 +160,93 @@ class CsvLoanLoaderTest {
         )
     }
 
+    @Test
+    fun should_rejectRowWithReason_when_fieldIsInvalid() {
+        val cases = listOf(
+            ("id" to "") to RejectReason.BAD_ID,
+            ("loan_amnt" to "0") to RejectReason.BAD_AMOUNT,
+            ("loan_amnt" to "ten") to RejectReason.BAD_AMOUNT,
+            ("funded_amnt" to "-1") to RejectReason.BAD_AMOUNT,
+            ("int_rate" to "n/a") to RejectReason.BAD_RATE,
+            ("int_rate" to "-1%") to RejectReason.BAD_RATE,
+            ("issue_d" to "2017-12") to RejectReason.BAD_ISSUE_DATE,
+            ("issue_d" to "Foo-2017") to RejectReason.BAD_ISSUE_DATE,
+            ("fico_range_low" to "") to RejectReason.BAD_FICO,
+            ("fico_range_high" to "7x4") to RejectReason.BAD_FICO,
+            ("fico_range_low" to "299") to RejectReason.BAD_FICO,
+            ("fico_range_high" to "851") to RejectReason.BAD_FICO,
+            ("fico_range_high" to "699") to RejectReason.BAD_FICO, // below fico_range_low (700)
+            ("grade" to "") to RejectReason.BAD_GRADE,
+            ("addr_state" to "") to RejectReason.BAD_STATE,
+            ("addr_state" to "California") to RejectReason.BAD_STATE,
+            ("addr_state" to "C1") to RejectReason.BAD_STATE,
+            ("purpose" to "") to RejectReason.BAD_PURPOSE,
+        )
+
+        cases.forEach { (override, reason) ->
+            val result = loader.load(writeCsv(HEADER, validRow(override)))
+
+            assertTrue(result.loans.isEmpty(), "override=$override")
+            assertEquals(0, result.report.accepted, "override=$override")
+            assertEquals(1, result.report.rejected, "override=$override")
+            assertEquals(mapOf(reason to 1), result.report.rejectedByReason, "override=$override")
+        }
+    }
+
+    @Test
+    fun should_normalizeStateAndPurpose_when_valuesHaveDifferentCase() {
+        val loan = loadRow("addr_state" to "ca", "purpose" to "Credit_Card")
+
+        assertEquals("CA", loan.state)
+        assertEquals("credit_card", loan.purpose)
+    }
+
+    @Test
+    fun should_acceptFico_when_valuesAreAtRangeBounds() {
+        val loan = loadRow("fico_range_low" to "300", "fico_range_high" to "850")
+
+        assertEquals(300, loan.ficoLow)
+        assertEquals(850, loan.ficoHigh)
+    }
+
+    @Test
+    fun should_rejectAsMalformed_when_rowHasWrongColumnCount() {
+        val result = loader.load(writeCsv(HEADER, "1,10000", validRow() + ",extra", validRow("id" to "2")))
+
+        assertEquals(listOf("2"), result.loans.map { it.id })
+        assertEquals(mapOf(RejectReason.MALFORMED_ROW to 2), result.report.rejectedByReason)
+    }
+
+    @Test
+    fun should_reconcileWithFooter_when_rejectedRowsAreCounted() {
+        val result = loader.load(
+            writeCsv(
+                HEADER,
+                validRow("id" to "1"),
+                validRow("id" to "2", "funded_amnt" to "500", "int_rate" to "n/a"),
+                validRow("id" to "3", "funded_amnt" to "2500"),
+                "Total amount funded in policy code 1: 13000",
+            ),
+        )
+
+        assertEquals(listOf("1", "3"), result.loans.map { it.id })
+        assertEquals(BigDecimal("12500"), result.report.acceptedFundedAmount)
+        assertEquals(BigDecimal("500"), result.report.rejectedFundedAmount)
+        assertTrue(result.report.reconciles)
+    }
+
+    @Test
+    fun should_notReconcile_when_footerIsMissingOrDiffers() {
+        val withoutFooter = loader.load(writeCsv(HEADER, validRow())).report
+        val withWrongFooter = loader.load(
+            writeCsv(HEADER, validRow(), "Total amount funded in policy code 1: 99999"),
+        ).report
+
+        assertNull(withoutFooter.footerFundedAmount)
+        assertFalse(withoutFooter.reconciles)
+        assertFalse(withWrongFooter.reconciles)
+    }
+
     private fun writeCsv(vararg lines: String): Path =
         Files.write(tempDir.resolve("loans.csv"), lines.toList())
 

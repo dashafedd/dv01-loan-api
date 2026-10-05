@@ -1,8 +1,5 @@
 package dv01.loan.api.controller
 
-import dv01.loan.api.controller.error.ParameterErrors
-import dv01.loan.api.model.enum.GroupBy
-import dv01.loan.api.model.loan.LoanFilter
 import dv01.loan.api.service.LoanFilterOptions
 import dv01.loan.api.service.LoanQueryService
 import dv01.loan.api.service.SummaryResponse
@@ -10,22 +7,39 @@ import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.RequestParam
 import org.springframework.web.bind.annotation.RestController
-import java.time.YearMonth
-import java.time.format.DateTimeFormatter
-import java.time.format.DateTimeParseException
 
+/**
+ * Read-only HTTP API over the loaded loan dataset.
+ * Handles routing only: parameter validation lives in SummaryRequestParser,
+ * filtering and aggregation in LoanQueryService.
+ */
 @RestController
 @RequestMapping("/api/v1/loans")
-class LoanController(private val service: LoanQueryService) {
+class LoanController(
+    private val service: LoanQueryService,
+    private val parser: SummaryRequestParser,
+) {
 
-    private companion object {
-        val MONTH_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("uuuu-MM")
-        val FICO_RANGE = 300..850
-    }
-
+    /**
+     * Returns the values present in the dataset (months, grades, states, purposes, FICO bands),
+     * i.e. what a client can pass as filters to /summary.
+     */
     @GetMapping("/options")
     fun options(): LoanFilterOptions = service.options
 
+    /**
+     * Returns aggregated stats for the loans matching the filters, in total and per group.
+     * Every parameter is optional; with none given, all loans are summarized by grade.
+     *
+     * groupBy          - grade (default), state, month, ficoBand or purpose
+     * grade, state,
+     * purpose          - comma-separated lists; a loan matches if it has any of the values
+     * from, to         - inclusive issue month range in yyyy-MM format
+     * ficoMin, ficoMax - inclusive range (300-850), compared against the midpoint of the loan's FICO range
+     *
+     * Parameters are taken as raw strings so that all invalid ones can be reported
+     * together in a single 400 response instead of failing on the first.
+     */
     @GetMapping("/summary")
     fun summary(
         @RequestParam(required = false) groupBy: String?,
@@ -37,85 +51,16 @@ class LoanController(private val service: LoanQueryService) {
         @RequestParam(required = false) ficoMin: String?,
         @RequestParam(required = false) ficoMax: String?,
     ): SummaryResponse {
-        val errors = ParameterErrors()
-        val availableOptions = service.options
-
-        var groupByParsed = GroupBy.GRADE //group by grade by default
-        if (groupBy != null) {
-            val parsed = GroupBy.parse(groupBy)
-            if (parsed == null) {
-                errors.reject("groupBy", "must be one of: ${GroupBy.allowedValues()}")
-            } else {
-                groupByParsed = parsed
-            }
-        }
-
-        val grades = splitUpper(grade).onEach { value ->
-            if (value !in availableOptions.grades) errors.reject("grade", "'$value' is not a grade in this dataset")
-        }.mapNotNull { it.firstOrNull() }.toSet()
-
-        val states = splitUpper(state).onEach { value ->
-            if (value !in availableOptions.states) errors.reject("state", "'$value' is not a state in this dataset")
-        }.toSet()
-
-        val purposes = split(purpose).onEach { value ->
-            if (value !in availableOptions.purposes) errors.reject(
-                "purpose",
-                "'$value' is not a purpose in this dataset"
-            )
-        }.toSet()
-
-        val fromMonth = month(from, "from", errors)
-        val toMonth = month(to, "to", errors)
-        if (fromMonth != null && toMonth != null && fromMonth > toMonth) {
-            errors.reject("from", "must not be after 'to'")
-        }
-
-        val minFico = fico(ficoMin, "ficoMin", errors)
-        val maxFico = fico(ficoMax, "ficoMax", errors)
-        if (minFico != null && maxFico != null && minFico > maxFico) {
-            errors.reject("ficoMin", "must not be greater than 'ficoMax'")
-        }
-
-        errors.throwIfAny()
-
-        return service.summary(
-            groupBy = groupByParsed,
-            filter = LoanFilter(
-                grades = grades,
-                states = states,
-                purposes = purposes,
-                from = fromMonth,
-                to = toMonth,
-                ficoMin = minFico,
-                ficoMax = maxFico,
-            ),
+        val request = parser.parse(
+            groupBy = groupBy,
+            grade = grade,
+            state = state,
+            purpose = purpose,
+            from = from,
+            to = to,
+            ficoMin = ficoMin,
+            ficoMax = ficoMax,
         )
+        return service.summary(groupBy = request.groupBy, filter = request.filter)
     }
-
-    private fun month(raw: String?, parameter: String, errors: ParameterErrors): YearMonth? {
-        if (raw.isNullOrBlank()) return null
-        return try {
-            YearMonth.parse(raw.trim(), MONTH_FORMAT)
-        } catch (_: DateTimeParseException) {
-            errors.reject(parameter, "must be a month in yyyy-MM format, e.g. 2017-12")
-            null
-        }
-    }
-
-    private fun fico(raw: String?, parameter: String, errors: ParameterErrors): Int? {
-        if (raw.isNullOrBlank()) return null
-        val value = raw.trim().toIntOrNull()
-        if (value == null || value !in FICO_RANGE) {
-            errors.reject(parameter, "must be a whole number between ${FICO_RANGE.first} and ${FICO_RANGE.last}")
-            return null
-        }
-        return value
-    }
-
-    private fun split(raw: String?): List<String> =
-        raw?.split(',')?.map { it.trim() }?.filter { it.isNotEmpty() } ?: emptyList()
-
-    private fun splitUpper(raw: String?) = split(raw).map { it.uppercase() }
-
 }

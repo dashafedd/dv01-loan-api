@@ -22,7 +22,7 @@ class LoanControllerTest {
     })
 
     private val mockMvc: MockMvc = MockMvcBuilders
-        .standaloneSetup(LoanController(service))
+        .standaloneSetup(LoanController(service, SummaryRequestParser(service)))
         .setControllerAdvice(ApiExceptionHandler())
         .build()
 

@@ -3,7 +3,7 @@ package dv01.loan.api.service
 import dv01.loan.api.loader.CsvLoanLoader
 import dv01.loan.api.loader.LoadResult
 import dv01.loan.api.loader.LoadingReport
-import dv01.loan.api.model.enum.GroupBy
+import dv01.loan.api.model.GroupBy
 import dv01.loan.api.model.loan.GroupStats
 import dv01.loan.api.model.loan.Loan
 import dv01.loan.api.model.loan.LoanFilter
