@@ -1,6 +1,6 @@
 package dv01.loan.api.loader
 
-import dv01.loan.api.model.Loan
+import dv01.loan.api.model.loan.Loan
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Assumptions.assumeFalse
 import org.junit.jupiter.api.Assumptions.assumeTrue
@@ -52,19 +52,19 @@ class CsvLoanLoaderTest {
     fun should_returnNoLoans_when_fileHasOnlyHeader() {
         val loans = loader.load(writeCsv(HEADER))
 
-        assertTrue(loans.isEmpty())
+        assertTrue(loans.loans.isEmpty())
     }
 
     @Test
     fun should_load298Loans_when_fileHasPreambleAndHeader() {
-        val loans = loader.load(samplePath())
+        val loansResult = loader.load(samplePath())
 
-        assertEquals(298, loans.size)
+        assertEquals(298, loansResult.loans.size)
     }
 
     @Test
     fun should_mapAllFields_when_rowIsValid() {
-        val loan = loader.load(samplePath()).first()
+        val loan = loader.load(samplePath()).loans.first()
 
         assertEquals("126285300", loan.id)
         assertEquals(YearMonth.of(2017, 12), loan.issueMonth)
@@ -81,15 +81,15 @@ class CsvLoanLoaderTest {
 
     @Test
     fun should_preserveFileOrder_when_loadingRows() {
-        val loans = loader.load(samplePath())
+        val loansResult = loader.load(samplePath())
 
-        assertEquals("126285300", loans.first().id)
-        assertEquals("126248664", loans.last().id)
+        assertEquals("126285300", loansResult.loans.first().id)
+        assertEquals("126248664", loansResult.loans.last().id)
     }
 
     @Test
     fun should_mapLastRow_when_fileHasFooter() {
-        val loan = loader.load(samplePath()).last()
+        val loan = loader.load(samplePath()).loans.last()
 
         assertEquals("126248664", loan.id)
         assertEquals("OR", loan.state)
@@ -104,7 +104,7 @@ class CsvLoanLoaderTest {
 
     @Test
     fun should_parseEveryField_when_allRowsAreValid() {
-        val loans = loader.load(samplePath())
+        val loans = loader.load(samplePath()).loans
 
         assertTrue(loans.all { it.id != null })
         assertTrue(loans.all { it.issueMonth == YearMonth.of(2017, 12) })
@@ -118,7 +118,7 @@ class CsvLoanLoaderTest {
 
     @Test
     fun should_stripPercentSignAndPadding_when_parsingInterestRate() {
-        val rates = loader.load(samplePath()).mapNotNull { it.interestRate }
+        val rates = loader.load(samplePath()).loans.mapNotNull { it.interestRate }
 
         assertEquals(BigDecimal("5.32"), rates.min())
         assertEquals(BigDecimal("30.79"), rates.max())
@@ -126,7 +126,7 @@ class CsvLoanLoaderTest {
 
     @Test
     fun should_parseAmounts_when_loadingRows() {
-        val loans = loader.load(samplePath())
+        val loans = loader.load(samplePath()).loans
 
         assertEquals(BigDecimal("4810575"), loans.sumOf { it.loanAmount!! })
         assertEquals(BigDecimal("4810575"), loans.sumOf { it.fundedAmount!! })
@@ -134,7 +134,7 @@ class CsvLoanLoaderTest {
 
     @Test
     fun should_parseFicoRange_when_loadingRows() {
-        val loans = loader.load(samplePath())
+        val loans = loader.load(samplePath()).loans
 
         assertEquals(660, loans.minOf { it.ficoLow!! })
         assertEquals(839, loans.maxOf { it.ficoHigh!! })
@@ -142,7 +142,7 @@ class CsvLoanLoaderTest {
 
     @Test
     fun should_parseGrades_when_loadingRows() {
-        val byGrade = loader.load(samplePath()).groupingBy { it.grade }.eachCount()
+        val byGrade = loader.load(samplePath()).loans.groupingBy { it.grade }.eachCount()
 
         assertEquals(
             mapOf('A' to 82, 'B' to 81, 'C' to 76, 'D' to 33, 'E' to 16, 'F' to 8, 'G' to 2),
@@ -152,91 +152,12 @@ class CsvLoanLoaderTest {
 
     @Test
     fun should_parseStatuses_when_loadingRows() {
-        val byStatus = loader.load(samplePath()).groupingBy { it.status }.eachCount()
+        val byStatus = loader.load(samplePath()).loans.groupingBy { it.status }.eachCount()
 
         assertEquals(
             mapOf("Current" to 162, "Fully Paid" to 103, "Charged Off" to 29, "Late (31-120 days)" to 4),
             byStatus,
         )
-    }
-
-    @Test
-    fun should_setIdToNull_when_idIsBlank() {
-        assertNull(loadRow("id" to "  ").id)
-    }
-
-    @Test
-    fun should_setLoanAmountToNull_when_loanAmountIsNotPositiveNumber() {
-        assertNull(loadRow("loan_amnt" to "").loanAmount)
-        assertNull(loadRow("loan_amnt" to "abc").loanAmount)
-        assertNull(loadRow("loan_amnt" to "0").loanAmount)
-        assertNull(loadRow("loan_amnt" to "-5000").loanAmount)
-    }
-
-    @Test
-    fun should_setFundedAmountToNull_when_fundedAmountIsNegativeOrNotNumber() {
-        assertNull(loadRow("funded_amnt" to "").fundedAmount)
-        assertNull(loadRow("funded_amnt" to "abc").fundedAmount)
-        assertNull(loadRow("funded_amnt" to "-1").fundedAmount)
-    }
-
-    @Test
-    fun should_setInterestRateToNull_when_interestRateIsNegativeOrNotNumber() {
-        assertNull(loadRow("int_rate" to "").interestRate)
-        assertNull(loadRow("int_rate" to "%").interestRate)
-        assertNull(loadRow("int_rate" to "abc%").interestRate)
-        assertNull(loadRow("int_rate" to "-1.5%").interestRate)
-    }
-
-    @Test
-    fun should_setIssueMonthToNull_when_issueDateIsInvalid() {
-        assertNull(loadRow("issue_d" to "").issueMonth)
-        assertNull(loadRow("issue_d" to "2017-12").issueMonth)
-        assertNull(loadRow("issue_d" to "Dec-17").issueMonth)
-        assertNull(loadRow("issue_d" to "Foo-2017").issueMonth)
-        assertNull(loadRow("issue_d" to "13-2017").issueMonth)
-    }
-
-    @Test
-    fun should_setFicoToNull_when_ficoIsNotInteger() {
-        val loan = loadRow("fico_range_low" to "7xx", "fico_range_high" to "704.5")
-
-        assertNull(loan.ficoLow)
-        assertNull(loan.ficoHigh)
-    }
-
-    @Test
-    fun should_setGradeToNull_when_gradeIsBlank() {
-        assertNull(loadRow("grade" to "").grade)
-    }
-
-    @Test
-    fun should_keepOtherFields_when_oneFieldIsInvalid() {
-        val loan = loadRow("loan_amnt" to "abc")
-
-        assertNull(loan.loanAmount)
-        assertEquals("1", loan.id)
-        assertEquals(BigDecimal("10000"), loan.fundedAmount)
-        assertEquals(BigDecimal("6.08"), loan.interestRate)
-        assertEquals(YearMonth.of(2017, 12), loan.issueMonth)
-        assertEquals("CA", loan.state)
-    }
-
-    @Test
-    fun should_leaveFieldsEmpty_when_columnsAreMissingFromHeader() {
-        val loan = loader.load(writeCsv("id,loan_amnt", "1,10000")).single()
-
-        assertEquals("1", loan.id)
-        assertEquals(BigDecimal("10000"), loan.loanAmount)
-        assertNull(loan.fundedAmount)
-        assertNull(loan.interestRate)
-        assertNull(loan.issueMonth)
-        assertNull(loan.ficoLow)
-        assertNull(loan.ficoHigh)
-        assertNull(loan.grade)
-        assertEquals("", loan.state)
-        assertEquals("", loan.purpose)
-        assertEquals("", loan.status)
     }
 
     private fun writeCsv(vararg lines: String): Path =
@@ -246,7 +167,7 @@ class CsvLoanLoaderTest {
         (VALID_VALUES + overrides).values.joinToString(",")
 
     private fun loadRow(vararg overrides: Pair<String, String>): Loan =
-        loader.load(writeCsv(HEADER, validRow(*overrides))).single()
+        loader.load(writeCsv(HEADER, validRow(*overrides))).loans.single()
 
     private companion object {
         val VALID_VALUES = linkedMapOf(

@@ -1,6 +1,6 @@
 package dv01.loan.api.loader
 
-import dv01.loan.api.model.Loan
+import dv01.loan.api.model.loan.Loan
 import org.apache.commons.csv.CSVFormat
 import org.apache.commons.csv.CSVRecord
 import org.slf4j.LoggerFactory
@@ -12,7 +12,10 @@ import java.time.YearMonth
 import java.time.format.DateTimeFormatter
 import java.time.format.DateTimeFormatterBuilder
 import java.time.format.ResolverStyle
+import java.util.EnumMap
 import java.util.Locale
+
+data class LoadResult(val loans: List<Loan>, val report: LoadingReport)
 
 @Component
 class CsvLoanLoader {
@@ -43,7 +46,7 @@ class CsvLoanLoader {
         const val STATUS_COLUMN = "loan_status"
     }
 
-    fun load(path: Path): List<Loan> {
+    fun load(path: Path): LoadResult {
         require(Files.isReadable(path)) {
             "Loan data file is not found or not readable: ${path.toAbsolutePath()}."
         }
@@ -52,6 +55,10 @@ class CsvLoanLoader {
         val loans = ArrayList<Loan>()
         //map column name to position in the record
         var columnsMap: Map<String, Int>? = null
+        var rejectedFunded = BigDecimal.ZERO
+        var acceptedFunded = BigDecimal.ZERO
+        val rejectedByReason = EnumMap<RejectReason, Int>(RejectReason::class.java)
+        val startedAt = System.nanoTime()
 
         Files.newBufferedReader(path).use { reader ->
             CSV_FORMAT.parse(reader).use { parser ->
@@ -69,8 +76,26 @@ class CsvLoanLoader {
                         continue
                     }
 
-                    val outcome = parseLoan(record, columnsMap)
-                    loans += outcome
+                    if (record.size() != columnsMap.size) {
+                        rejectedByReason.merge(RejectReason.MALFORMED_ROW, 1, Int::plus)
+                        continue
+                    }
+
+                    val funded = columnsMap["funded_amnt"]
+                        ?.let { record[it].trim().toBigDecimalOrNull() }
+                        ?: BigDecimal.ZERO
+
+                    when (val outcome = parseLoan(record, columnsMap)) {
+                        is ParseOutcome.Accepted -> {
+                            loans += outcome.loan
+                            acceptedFunded = acceptedFunded.add(outcome.loan.fundedAmount)
+                        }
+
+                        is ParseOutcome.Rejected -> {
+                            rejectedByReason.merge(outcome.reason, 1, Int::plus)
+                            rejectedFunded = rejectedFunded.add(funded)
+                        }
+                    }
                 }
             }
         }
@@ -79,44 +104,70 @@ class CsvLoanLoader {
 
         log.info("Loaded {} loans from {}", loans.size, path.toAbsolutePath())
 
-        return loans
+        val report = LoadingReport(
+            accepted = loans.size,
+            rejected = rejectedByReason.values.sum(),
+            rejectedByReason = rejectedByReason.toMap(),
+            loadMillis = (System.nanoTime() - startedAt) / 1_000_000,
+            acceptedFundedAmount = acceptedFunded,
+            rejectedFundedAmount = rejectedFunded
+        )
+
+        return LoadResult(loans, report)
     }
 
-    private fun parseLoan(record: CSVRecord, columns: Map<String, Int>): Loan {
+    private fun parseLoan(record: CSVRecord, columns: Map<String, Int>): ParseOutcome {
         fun column(name: String): String = columns[name]?.let { record[it].trim() } ?: ""
 
-        val id = column(ID_COLUMN).takeIf { it.isNotEmpty() } // to check
+        val id = column(ID_COLUMN).takeIf { it.isNotEmpty() }
+            ?: return ParseOutcome.Rejected(RejectReason.BAD_ID) // to check
         val loanAmount = column(LOAN_AMOUNT_COLUMN).toBigDecimalOrNull()?.takeIf { it > BigDecimal.ZERO }
+            ?: return ParseOutcome.Rejected(RejectReason.BAD_AMOUNT)
         val fundedAmount = column(FUNDED_AMOUNT_COLUMN).toBigDecimalOrNull()?.takeIf { it >= BigDecimal.ZERO }
+            ?: return ParseOutcome.Rejected(RejectReason.BAD_AMOUNT)
         val rate =
             column(INTEREST_RATE_COLUMN).removeSuffix("%").trim().toBigDecimalOrNull()?.takeIf { it >= BigDecimal.ZERO }
+                ?: return ParseOutcome.Rejected(RejectReason.BAD_RATE)
         val issueMonth = runCatching {
             YearMonth.parse(
                 column(ISSUE_DATE_COLUMN),
                 ISSUE_DATE
             )
         }.getOrNull()
-        val state = column(ADDRESS_STATE_COLUMN).uppercase(Locale.ROOT)
-        val ficoLow = column(FICO_LOW_COLUMN).toIntOrNull()
-        val ficoHigh = column(FICO_HIGH_COLUMN).toIntOrNull()
-        val grade = column(GRADE_COLUMN).firstOrNull()?.uppercaseChar()
+            ?: return ParseOutcome.Rejected(RejectReason.BAD_ISSUE_DATE)
 
-        return Loan(
-            id = id,
-            issueMonth = issueMonth,
-            state = state,
-            grade = grade,
-            ficoLow = ficoLow,
-            ficoHigh = ficoHigh,
-            loanAmount = loanAmount,
-            fundedAmount = fundedAmount,
-            interestRate = rate,
-            purpose = column(PURPOSE_COLUMN),
-            status = column(STATUS_COLUMN),
+        val state = column(ADDRESS_STATE_COLUMN).uppercase(Locale.ROOT)
+
+        val ficoLow = column(FICO_LOW_COLUMN).toIntOrNull()
+            ?: return ParseOutcome.Rejected(RejectReason.BAD_FICO)
+        val ficoHigh = column(FICO_HIGH_COLUMN).toIntOrNull()
+            ?: return ParseOutcome.Rejected(RejectReason.BAD_FICO)
+        val grade = column(GRADE_COLUMN).firstOrNull()?.uppercaseChar()
+            ?: return ParseOutcome.Rejected(RejectReason.BAD_GRADE)
+
+        return ParseOutcome.Accepted(
+            Loan(
+                id = id,
+                issueMonth = issueMonth,
+                state = state,
+                grade = grade,
+                ficoLow = ficoLow,
+                ficoHigh = ficoHigh,
+                loanAmount = loanAmount,
+                fundedAmount = fundedAmount,
+                interestRate = rate,
+                purpose = column(PURPOSE_COLUMN),
+                status = column(STATUS_COLUMN),
+            )
         )
     }
 
     private fun indexColumns(header: CSVRecord): Map<String, Int> =
         header.toList().withIndex().associate { (index, name) -> name.trim() to index }
+
+    private sealed interface ParseOutcome {
+        data class Accepted(val loan: Loan) : ParseOutcome
+        data class Rejected(val reason: RejectReason) : ParseOutcome
+    }
 
 }
