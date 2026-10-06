@@ -167,7 +167,7 @@ mistaken for an empty result.
 
 ### Data model
 
-```mermaid
+```
 Loan {
         String id
         YearMonth issueMonth
